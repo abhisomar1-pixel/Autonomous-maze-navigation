@@ -1,0 +1,13 @@
+
+<package format="2">
+<name>autonomous_maze_turtle</name>
+<version>1.0.0</version>
+<description>7x7 maze drawing and BFS navigation using two turtles in ROS 1.</description>
+<maintainer email="your_email@example.com">Your Name</maintainer>
+<license>MIT</license>
+<buildtool_depend>catkin</buildtool_depend>
+<exec_depend>rospy</exec_depend>
+<exec_depend>geometry_msgs</exec_depend>
+<exec_depend>turtlesim</exec_depend>
+<exec_depend>std_msgs</exec_depend>
+</package>
