@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+"""Two-turtle 7x7 maze drawing and BFS navigation demo for ROS 1 Noetic."""
+
+import math
+from collections import deque
+
+import rospy
+from geometry_msgs.msg import Twist
+from std_msgs.msg import String
+from turtlesim.msg import Pose
+from turtlesim.srv import Spawn, SetPen
+
+SIZE = 7
+START = (0, 0)
+GOAL = (6, 6)
+
+# Demonstration corridor. All other cells are blocked.
+EXPECTED_PATH = [
+    (0, 0), (0, 1), (0, 2), (1, 2), (2, 2), (2, 3), (2, 4),
+    (3, 4), (4, 4), (4, 5), (4, 6), (5, 6), (6, 6)
+]
+OPEN_CELLS = set(EXPECTED_PATH)
+OBSTACLES = {(r, c) for r in range(SIZE) for c in range(SIZE)
+             if (r, c) not in OPEN_CELLS}
+
+ORIGIN = 1.0
+CELL = 1.15
+LIMIT = ORIGIN + SIZE * CELL
+
+
+class MazeNavigation:
+    def __init__(self):
+        rospy.init_node("maze_navigation")
+        self.pose1 = None
+        self.pose2 = None
+
+        self.pub1 = rospy.Publisher("/turtle1/cmd_vel", Twist, queue_size=10)
+        self.pub2 = rospy.Publisher("/turtle2/cmd_vel", Twist, queue_size=10)
+        self.path_pub = rospy.Publisher("/path_topic", String, queue_size=10, latch=True)
+
+        rospy.Subscriber("/turtle1/pose", Pose, self.pose1_cb)
+        rospy.wait_for_service("/spawn")
+        rospy.wait_for_service("/turtle1/set_pen")
+        self.spawn_second_turtle()
+        rospy.Subscriber("/turtle2/pose", Pose, self.pose2_cb)
+        rospy.sleep(1.0)
+
+    def pose1_cb(self, msg):
+        self.pose1 = msg
+
+    def pose2_cb(self, msg):
+        self.pose2 = msg
+
+    @staticmethod
+    def world(cell):
+        row, col = cell
+        return ORIGIN + (col + 0.5) * CELL, ORIGIN + (row + 0.5) * CELL
+
+    def spawn_second_turtle(self):
+        x, y = self.world(START)
+        try:
+            rospy.ServiceProxy("/spawn", Spawn)(x, y, 0.0, "turtle2")
+            rospy.loginfo("Turtle2 spawned at the start cell.")
+        except rospy.ServiceException as error:
+            rospy.logwarn("Turtle2 may already exist: %s", error)
+
+    def pen(self, name, r, g, b, width=3, off=0):
+        try:
+            rospy.ServiceProxy("/" + name + "/set_pen", SetPen)(
+                r, g, b, width, off)
+        except rospy.ServiceException as error:
+            rospy.logwarn("Pen service error for %s: %s", name, error)
+
+    def move_to(self, name, x, y, speed=1.8):
+        publisher = self.pub1 if name == "turtle1" else self.pub2
+        rate = rospy.Rate(30)
+        while not rospy.is_shutdown():
+            pose = self.pose1 if name == "turtle1" else self.pose2
+            if pose is None:
+                rate.sleep()
+                continue
+
+            dx, dy = x - pose.x, y - pose.y
+            distance = math.hypot(dx, dy)
+            if distance < 0.07:
+                break
+
+            target_angle = math.atan2(dy, dx)
+            error = math.atan2(math.sin(target_angle - pose.theta),
+                               math.cos(target_angle - pose.theta))
+            command = Twist()
+            command.angular.z = 5.0 * error
+            command.linear.x = min(speed, 1.5 * distance) if abs(error) < 0.5 else 0.0
+            publisher.publish(command)
+            rate.sleep()
+
+        publisher.publish(Twist())
+
+    def draw_line(self, x1, y1, x2, y2):
+        self.pen("turtle1", 0, 0, 0, 3, 1)
+        self.move_to("turtle1", x1, y1)
+        self.pen("turtle1", 0, 0, 0, 3, 0)
+        self.move_to("turtle1", x2, y2)
+        self.pen("turtle1", 0, 0, 0, 3, 1)
+
+    def draw_maze(self):
+        rospy.loginfo("Turtle1 is drawing the 7x7 maze.")
+        for i in range(SIZE + 1):
+            x = ORIGIN + i * CELL
+            self.draw_line(x, ORIGIN, x, LIMIT)
+        for i in range(SIZE + 1):
+            y = ORIGIN + i * CELL
+            self.draw_line(ORIGIN, y, LIMIT, y)
+
+        # Red X marks show blocked cells.
+        for row, col in sorted(OBSTACLES):
+            x0, y0 = ORIGIN + col * CELL, ORIGIN + row * CELL
+            d = 0.16
+            self.pen("turtle1", 190, 0, 0, 4, 1)
+            self.move_to("turtle1", x0 + d, y0 + d)
+            self.pen("turtle1", 190, 0, 0, 4, 0)
+            self.move_to("turtle1", x0 + CELL - d, y0 + CELL - d)
+            self.pen("turtle1", 190, 0, 0, 4, 1)
+            self.move_to("turtle1", x0 + d, y0 + CELL - d)
+            self.pen("turtle1", 190, 0, 0, 4, 0)
+            self.move_to("turtle1", x0 + CELL - d, y0 + d)
+            self.pen("turtle1", 190, 0, 0, 4, 1)
+        rospy.loginfo("Maze drawing completed.")
+
+    @staticmethod
+    def bfs(start, goal):
+        queue = deque([start])
+        visited = {start}
+        parent = {start: None}
+        # Fixed neighbour order makes the demonstration deterministic.
+        directions = [(0, 1), (1, 0), (0, -1), (-1, 0)]
+
+        while queue:
+            current = queue.popleft()
+            if current == goal:
+                break
+            for dr, dc in directions:
+                nxt = (current[0] + dr, current[1] + dc)
+                valid = 0 <= nxt[0] < SIZE and 0 <= nxt[1] < SIZE
+                if valid and nxt not in OBSTACLES and nxt not in visited:
+                    visited.add(nxt)
+                    parent[nxt] = current
+                    queue.append(nxt)
+
+        if goal not in parent:
+            return []
+
+        result = []
+        cell = goal
+        while cell is not None:
+            result.append(cell)
+            cell = parent[cell]
+        return list(reversed(result))
+
+    def follow_path(self, path):
+        route = " -> ".join("({}, {})".format(r, c) for r, c in path)
+        self.path_pub.publish(String(data=route))
+        rospy.loginfo("BFS route: %s", route)
+
+        self.pen("turtle2", 0, 100, 255, 5, 0)
+        for cell in path:
+            x, y = self.world(cell)
+            self.move_to("turtle2", x, y, speed=1.6)
+        rospy.loginfo("Turtle2 reached goal %s.", GOAL)
+
+    def run(self):
+        rospy.sleep(1.0)
+        self.draw_maze()
+        path = self.bfs(START, GOAL)
+        if not path:
+            rospy.logerr("No route found.")
+            return
+        self.follow_path(path)
+
+
+if __name__ == "__main__":
+    try:
+        MazeNavigation().run()
+    except rospy.ROSInterruptException:
+        pass
